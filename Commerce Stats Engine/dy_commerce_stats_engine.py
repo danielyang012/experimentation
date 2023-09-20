@@ -195,11 +195,10 @@ def parse_conversions(df):
     if i+1 == which_url_determines_conversion:
       conversion_col = v
 
-
   #remove rows where conversion is True, but entitlement = Free or Empty
-  false_conversion_condition = (df[url_metric_name_list[which_url_determines_conversion]] == True) & (df['visitor_entitlement'].isin(['Free', np.nan]))
+  false_conversion_condition = ((df[url_metric_name_list[which_url_determines_conversion-1]] == True) & \
+   ((df['visitor_entitlement'] == "Free") | (df['visitor_entitlement'].isna())))
   df.drop(df[false_conversion_condition].index, inplace=True)
-
 
   df['Monthly Conversions'] = (conversion_col) & (df['billing_cycle'] == 'MONTHLY')
   df['Annual Conversions'] = (conversion_col) & (df['billing_cycle'] == 'ANNUAL')
@@ -221,6 +220,8 @@ conversion_df.to_csv(experiment_csv_file, index=False, chunksize=500000)
 display(conversion_df.head())
 display(conversion_df.describe())
 display(conversion_df.info())
+
+
 
 # @title Aggregate Counts
 def aggregate_counts(df):
