@@ -34,7 +34,7 @@ Welcome to the Commerce/Growth Marketing Stats Engine, your tool for all things 
 *   url_1_metric_name = determines name of  "been_to_url1"
 *   url_2_metric_name = determines name of  "been_to_url2"
 *   url_3_metric_name = determines name of  "been_to_url3"
-*   url_4_metric_name = determines name of "been_to_url_4". Fill as "None" if not used
+*   url_4_metric_name = determines name of "been_to_url4". Fill as "None" if not used
 *   which_url_determines_conversion = selects which url_metric to calculate conversion metrics for (numerator)
 *   which_url_determines_denominator = selects which url_metric to utilize for the denominator in conversion rates
 *   control_name = determines which variant name
@@ -47,6 +47,14 @@ Welcome to the Commerce/Growth Marketing Stats Engine, your tool for all things 
 # @title Load Packages
 # %pip install sqldf
 # %pip install statsmodels
+# %pip install tabulate
+# %pip install reportlab
+from reportlab.lib.pagesizes import letter
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, Image
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib.units import inch
+from reportlab.platypus.flowables import PageBreak
+from io import BytesIO
 import sqldf
 import pandas as pd
 import seaborn as sns
@@ -67,6 +75,7 @@ import seaborn as sns
 from statsmodels.stats import proportion as prop
 from matplotlib.ticker import FuncFormatter
 import shutil
+from tabulate import tabulate
 
 warnings.filterwarnings('ignore')
 
@@ -76,21 +85,16 @@ print('Authenticated to Bigquery!')
 
 # %load_ext google.colab.data_table
 
-#@title Code to Refresh Directory
-print("Optional: Specify a folder to delete")
-delete_directory_path = '/content/Experiment Analysis Outputs: HP Anchor Hero CTA to Plan Picker' # @param {type:"string"}
-if os.path.exists(delete_directory_path):
-    shutil.rmtree(delete_directory_path)  # This deletes a folder and its contents recursively
-    print(f"Deleted {delete_directory_path}")
-else:
-    print(f"The folder '{delete_directory_path}' does not exist.")
-
 # @title Experiment Parameters { run: "auto", vertical-output: true, form-width: "50%", display-mode: "both" }
-id_type = "visitor id" # @param ["visitor id", "tracking id"]
+table_type = "tracking id" # @param ["visitor", "tracking id"]
+user_cohorts = "all" # @param ["all", "new acquisition", "existing"]
+
 experiment_id = 25003380671 # @param {type:"string"}
 significance_level = .1 # @param {type:"number"}
+
 experiment_start_date = '2023-08-09' # @param{type:"date"}
 experiment_end_date = '2023-08-29'# @param{type:"date"}
+
 
 url_1_metric_name = 'Visits' #@param {type:"string"}
 url_2_metric_name = 'Clicks' #@param {type:"string"}
@@ -102,7 +106,9 @@ bq_config_vars = {'project_id': 'nbcu-ds-sandbox-a-001',
 
 which_url_determines_conversion = 3 # @param [3, 4]
 which_url_determines_denominator = 1 # @param [1, 2,3]
+include_plan_level_conversion_metrics = "No" # @param ["No", "Yes"]
 control_name = 'Control' #@param {type:"string"}
+
 
 url_metric_name_list = [url_1_metric_name,
             url_2_metric_name,
@@ -114,18 +120,21 @@ denom_name = url_metric_name_list[which_url_determines_denominator - 1]
 print("Please review your experiment parameters. Consult the ReadMe for definitions.")
 
 # @title Query Dolphin
-def get_experiment_data(id_type):
-
-  if id_type == "visitor id":
+def get_experiment_data(table_type):
+  if table_type == "visitor":
     id = 'visitor_id'
     table = '`nbcu-ds-prod-001.PeacockDataMartProductAnalyticsSilver.silver_commerce_web_test_visitor_level`'
-  elif id_type == "tracking id":
+  elif table_type == "tracking id":
     id = 'tracking_id'
     table = '`nbcu-ds-prod-001.PeacockDataMartProductAnalyticsSilver.silver_commerce_web_test_tracking_id_level`'
   else:
     print("Invalid user type parameter given. Reconfigure Experiment Parameters please.")
     pass
 
+  if user_cohorts == "all":
+    user_filter_snippet = "AND 1=1"
+  else:
+    user_filter_snippet = f"AND user_status = '{user_cohorts}'"
   query = f"""
     SELECT
     {id} AS id,
@@ -144,30 +153,32 @@ def get_experiment_data(id_type):
     {table}
     WHERE 1=1
     AND test_id = '{experiment_id}'
+    {user_filter_snippet}
     AND min_date BETWEEN '{experiment_start_date}' AND '{experiment_end_date}'
   """
-
+  print("Here's your query which will be the data for your analysis today: ")
+  print(query)
   df  = pd.read_gbq(query,project_id = bq_config_vars['project_id'], use_bqstorage_api=True, progress_bar_type = 'tqdm')
-
   experiment_name = df['test_name'].unique().astype('str')[0]
   return(df, experiment_name,query)
 
-results = get_experiment_data(id_type)
+results = get_experiment_data(table_type)
 query_df, experiment_name, query = results[0], results[1], results[2]
-
-print("Here's your query which will be the data for your analysis today: ")
-print(query)
 
 #@title Set up Output Directory
 # Create subfolders
 al_name, htv_name, tsv_name = "Analysis Log", "Hypothesis Test Visuals", "Time Series Visuals"
-parent_folder = "Experiment Analysis Outputs: " + experiment_name
+parent_folder = "Report: " + experiment_name
+diagnostics_folder = "Diagnostics: " + experiment_name
 # Create the parent folder if it doesn't exist
 if not os.path.exists(parent_folder):
     os.mkdir(parent_folder)
-    print("Making parent folder: ", parent_folder)
+    print("Making report folder: ", parent_folder)
+if not os.path.exists(diagnostics_folder):
+    os.mkdir(diagnostics_folder)
+    print("Making diagnostics folder: ", diagnostics_folder)
   # Change the working directory to the parent folder
-os.chdir(parent_folder)
+os.chdir(diagnostics_folder)
 # Create the subfolders if they don't exist
 for subfolder in [al_name, htv_name, tsv_name]:
     if not os.path.exists(subfolder):
@@ -226,7 +237,7 @@ def parse_conversions(df):
 
 conversion_df = parse_conversions(query_df)
 print("Writing experiment data to csv (500K row partitions)")
-experiment_csv_file = parent_folder + '/' + al_name + '/'+ 'Experiment Level Data' + '.csv'
+experiment_csv_file = diagnostics_folder + '/' + al_name + '/'+ 'Experiment Level Data' + '.csv'
 conversion_df.to_csv(experiment_csv_file, index=False, chunksize=500000)
 
 print(parse_conversions.__doc__)
@@ -412,6 +423,8 @@ def visualize_experiment_data(data_dict):
       ]
       metric_names_lol = ['Funnel Metrics','Subscription Metrics','Funnel Rates',
                           'Subscription Rates','Funnel Rates vs Control','Subscription Rates vs Control']
+
+
       """ End of hard-coding heavy section """
       for i, metric_group in enumerate(metric_lol):
         chart_name = f"{metric_names_lol[i]}: {k}.png"
@@ -435,14 +448,17 @@ def visualize_experiment_data(data_dict):
               # set up y-axis start point
               ylim_bot = min(sub_v[sub_v['variant_name'] == variant_name][metric].min() * 1.5, 0)
               ylim_top = max(sub_v[sub_v['variant_name'] == variant_name][metric].max() * 1.5, 0)
-              ax.set_ylim(ylim_bot , ylim_top, auto = True)
+              try:
+                ax.set_ylim(ylim_bot , ylim_top, auto = True)
+              except: #errors if denominator is 0
+                ax.set_ylim(auto = True)
           ax.set_xlabel('Exposure Date', fontsize = 8)
           ax.set_xticklabels(ax.get_xticklabels(), rotation=45, fontsize = 9)
           ax.set_title(f'{k}: {metric}')
           ax.legend(loc='best',  frameon=True, fontsize=8)
         plt.tight_layout(pad = 2)
         plt.show()
-        fig.savefig(parent_folder + '/' + tsv_name +'/'+  chart_name)
+        fig.savefig(diagnostics_folder + '/' + tsv_name +'/'+  chart_name)
         plt.clf()
     else:
         pass
@@ -561,9 +577,10 @@ def visualize_hyp_data(dict):
       plt.title("P-values for " + g, size=12)
       plt.axhline(y=0.1, color='red', linestyle='dotted', label='Threshold (0.1)', alpha = .5)  # Add the dotted line
       plt.tight_layout(pad = 2)
-      plt.savefig(f"{parent_folder}/{htv_name}/{k}; {g}: P-values.png")
+      plt.savefig(f"{diagnostics_folder}/{htv_name}/{k}; {g}: P-values.png")
       plt.show()
       plt.clf()
+
       #plot name and save confidence interval
       plt.figure(figsize = (8,8))
       plt.style.use('seaborn-muted')
@@ -578,7 +595,7 @@ def visualize_hyp_data(dict):
         plt.title(str(percentage_formatter(1- significance_level,0))+ " Confidence Intervals for: " + g, size=12)
       plt.axhline(y=0.0, color='red', linestyle='dotted', alpha = .5)
       plt.tight_layout(pad = 2)
-      plt.savefig(f"{parent_folder}/{htv_name}/{k}: {g}: Relative Lift CI.png")
+      plt.savefig(f"{diagnostics_folder}/{htv_name}/{k}: {g}: Relative Lift CI.png")
       plt.show()
       plt.clf()
   plt.close()
@@ -588,7 +605,7 @@ print(visualize_hyp_data.__doc__)
 visualize_hyp_data(hypothesis_dict)
 
 # @title Log Data into Excel Sheets
-def log_dict_data(dict, name, parent_folder, subfolder_name):
+def log_dict_data(dict, name, folder, subfolder_name):
   """ This function takes in a dictionary of dataframes and imports each dataframe as a sheet in an .xlsx spreadsheet
   """
   #log query.txt
@@ -598,13 +615,94 @@ def log_dict_data(dict, name, parent_folder, subfolder_name):
       text_file.write(query)
 
   # Specify the Excel file name
-  excel_file = parent_folder+ '/' + subfolder_name + '/'+ name + '.xlsx'
+  excel_file = folder+ '/' + subfolder_name + '/'+ name + '.xlsx'
   # Create a Pandas Excel writer using ExcelWriter
   with pd.ExcelWriter(excel_file) as writer:
       # Iterate through the dictionary and write each DataFrame to a sheet
       for sheet_name, df in dict.items():
           df.to_excel(writer, sheet_name=sheet_name, index=False)
 print(log_dict_data.__doc__)
-log_dict_data(agg_lifts_dict, 'Analysis Data', parent_folder, al_name )
-log_dict_data(hypothesis_dict, 'Hypothesis Testing Data', parent_folder, al_name)
+log_dict_data(agg_lifts_dict, 'Analysis Data', diagnostics_folder, al_name )
+log_dict_data(hypothesis_dict, 'Hypothesis Testing Data', diagnostics_folder, al_name)
 print("Data Logged!")
+
+#@title Code to Refresh Directory
+print("Optional: Specify a folder to delete")
+delete_directory_path = 'sample_data' # @param {type:"string"}
+if os.path.exists(delete_directory_path):
+    shutil.rmtree(delete_directory_path)  # This deletes a folder and its contents recursively
+    print(f"Deleted {delete_directory_path}")
+else:
+    print(f"The folder '{delete_directory_path}' does not exist.")
+
+# Create a PDF file
+pdf_file = f"{experiment_name} Report.pdf"
+doc = SimpleDocTemplate(pdf_file, pagesize=letter)
+
+# Define the content for the PDF
+story = []
+
+# Set the styles for the document
+styles = getSampleStyleSheet()
+normal_style = styles["Normal"]
+
+# Add a title
+title = Paragraph("Sample PDF Document", styles["Title"])
+story.append(title)
+
+# Add text description
+description = """
+This is a sample PDF document created using Python and ReportLab.
+You can include multiple tables, charts, and text descriptions.
+"""
+story.append(Paragraph(description, normal_style))
+story.append(Spacer(1, 0.2 * inch))
+
+# Table 1
+data1 = [["Name", "Age", "Occupation"],
+         ["Alice", 28, "Engineer"],
+         ["Bob", 24, "Designer"],
+         ["Charlie", 32, "Data Scientist"]]
+
+table1 = Table(data1, colWidths=[1.5 * inch, 0.8 * inch, 2 * inch])
+story.append(table1)
+story.append(Spacer(1, 0.2 * inch))
+
+# Chart 1 with text description
+plt.figure(figsize=(6, 4))
+plt.plot([1, 2, 3, 4, 5], [10, 15, 13, 18, 20])
+plt.title("Sample Chart 1")
+plt.xlabel("X-axis")
+plt.ylabel("Y-axis")
+plt.grid(True)
+
+# Save the chart to a BytesIO object
+chart_buffer = BytesIO()
+plt.savefig(chart_buffer, format="png")
+plt.close()
+chart_buffer.seek(0)
+
+# Create an Image element from the chart
+chart_image = Image(chart_buffer, width=4 * inch, height=3 * inch)
+story.append(chart_image)
+
+chart_description = """
+Here is a sample line chart. This chart demonstrates the ability to include charts
+in the PDF document with corresponding text descriptions.
+"""
+story.append(Paragraph(chart_description, normal_style))
+story.append(Spacer(1, 0.2 * inch))
+
+# Table 2
+data2 = [["Product", "Quantity", "Price"],
+         ["Product A", 50, 10.99],
+         ["Product B", 30, 15.49],
+         ["Product C", 20, 8.99]]
+
+table2 = Table(data2, colWidths=[1.5 * inch, 0.8 * inch, 1 * inch])
+story.append(table2)
+
+# Build the PDF document
+doc.build(story)
+
+print(f"PDF file '{pdf_file}' created successfully.")
