@@ -53,6 +53,7 @@ from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, Image
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib.units import inch
+from reportlab.platypus import TableStyle
 from reportlab.platypus.flowables import PageBreak
 from io import BytesIO
 import sqldf
@@ -85,7 +86,7 @@ print('Authenticated to Bigquery!')
 
 # %load_ext google.colab.data_table
 
-# @title Experiment Parameters { run: "auto", vertical-output: true, form-width: "50%", display-mode: "both" }
+# @title Tune Experiment Settings { run: "auto", vertical-output: true, form-width: "50%", display-mode: "both" }
 table_type = "tracking id" # @param ["visitor", "tracking id"]
 user_cohorts = "all" # @param ["all", "new acquisition", "existing"]
 
@@ -95,29 +96,34 @@ significance_level = .1 # @param {type:"number"}
 experiment_start_date = '2023-08-09' # @param{type:"date"}
 experiment_end_date = '2023-08-29'# @param{type:"date"}
 
+include_plan_level_conversion_metrics = "No" # @param ["No", "Yes"]
+print("Please review your experiment parameters. Consult the ReadMe for definitions.")
+
+# @title Additional Settings { run: "auto", vertical-output: true, form-width: "50%", display-mode: "both" }
 
 url_1_metric_name = 'Visits' #@param {type:"string"}
 url_2_metric_name = 'Clicks' #@param {type:"string"}
 url_3_metric_name = 'Conversions' #@param {type:"string"}
 url_4_metric_name = 'None' #@param {type:"string"}
 
-bq_config_vars = {'project_id': 'nbcu-ds-sandbox-a-001',
-                  'dataset_id': 'nbcu-ds-prod-001'}
 
 which_url_determines_conversion = 3 # @param [3, 4]
 which_url_determines_denominator = 1 # @param [1, 2,3]
-include_plan_level_conversion_metrics = "No" # @param ["No", "Yes"]
+
 control_name = 'Control' #@param {type:"string"}
 
-
-url_metric_name_list = [url_1_metric_name,
-            url_2_metric_name,
-            url_3_metric_name,
-            url_4_metric_name
+# @title Set Global Variables
+print("Setting up Global Variables")
+bq_config_vars = {'project_id': 'nbcu-ds-sandbox-a-001',
+                  'dataset_id': 'nbcu-ds-prod-001'}
+url_metric_name_list = [
+    url_1_metric_name,
+    url_2_metric_name,
+    url_3_metric_name,
+    url_4_metric_name
 ]
-denom_name = url_metric_name_list[which_url_determines_denominator - 1]
-
-print("Please review your experiment parameters. Consult the ReadMe for definitions.")
+denom_name = url_metric_name_list[which_url_determines_denominator - 1] # get name of denominator chosen by user to subset columns
+report_components = {} # dictionary to store report components
 
 # @title Query Dolphin
 def get_experiment_data(table_type):
@@ -130,7 +136,6 @@ def get_experiment_data(table_type):
   else:
     print("Invalid user type parameter given. Reconfigure Experiment Parameters please.")
     pass
-
   if user_cohorts == "all":
     user_filter_snippet = "AND 1=1"
   else:
@@ -224,15 +229,16 @@ def parse_conversions(df):
    ((df['visitor_entitlement'] == "Free") | (df['visitor_entitlement'].isna())))
   df.drop(df[false_conversion_condition].index, inplace=True)
 
-  df['Monthly Conversions'] = (conversion_col) & (df['billing_cycle'] == 'MONTHLY')
-  df['Annual Conversions'] = (conversion_col) & (df['billing_cycle'] == 'ANNUAL')
-  df['Premium Conversions'] = (conversion_col) & (df['visitor_entitlement'] == 'Premium')
-  df['Premium Plus Conversions'] = (conversion_col) & (df['visitor_entitlement'] == 'Premium+')
+  if include_plan_level_conversion_metrics == "Yes": # only add these columns if user chose to add these in
+    df['Monthly Conversions'] = (conversion_col) & (df['billing_cycle'] == 'MONTHLY')
+    df['Annual Conversions'] = (conversion_col) & (df['billing_cycle'] == 'ANNUAL')
+    df['Premium Conversions'] = (conversion_col) & (df['visitor_entitlement'] == 'Premium')
+    df['Premium Plus Conversions'] = (conversion_col) & (df['visitor_entitlement'] == 'Premium+')
 
-  df['Premium Monthly Conversions'] = df['Premium Conversions'] & (df['billing_cycle'] == 'MONTHLY')
-  df['Premium Monthly Plus Conversions'] = df['Premium Plus Conversions'] & (df['billing_cycle'] == 'MONTHLY')
-  df['Premium Annual Conversions'] = df['Premium Conversions'] & (df['billing_cycle'] == 'ANNUAL')
-  df['Premium Plus Annual Conversions'] = df['Premium Plus Conversions'] & (df['billing_cycle'] == 'ANNUAL')
+    df['Premium Monthly Conversions'] = df['Premium Conversions'] & (df['billing_cycle'] == 'MONTHLY')
+    df['Premium Monthly Plus Conversions'] = df['Premium Plus Conversions'] & (df['billing_cycle'] == 'MONTHLY')
+    df['Premium Annual Conversions'] = df['Premium Conversions'] & (df['billing_cycle'] == 'ANNUAL')
+    df['Premium Plus Annual Conversions'] = df['Premium Plus Conversions'] & (df['billing_cycle'] == 'ANNUAL')
   return(df)
 
 conversion_df = parse_conversions(query_df)
@@ -252,7 +258,7 @@ display(conversion_df.info())
 def aggregate_counts(df):
   """
   Description: This function takes in dataframe with parsed conversions and returns a dictionary of dataframes with sum/cumsum of raw, granular conversions
-
+  It aggregates conversion counts by different grain levels
   6 dataframes are returned with the following names, indicating the type of aggregation performed on metrics:
       'Daily Variant-User Status Level'
       'Daily Variant Level'
@@ -309,16 +315,17 @@ def aggregate_counts(df):
       'Overall Variant-User Status Level': overall_grain_level_df.reset_index(),
       'Overall Variant Level': overall_variant_level_df.reset_index()
   }
+
+  for i,v in analysis_data_dict.items():
+    display(f"Info on {i}")
+    display(v.head())
+    display(v.describe())
+    display(v.info())
   return(analysis_data_dict)
 
 #instantiate dictionary of aggregated data
 print(aggregate_counts.__doc__)
 agg_dfs_dict = aggregate_counts(conversion_df)
-for i,v in agg_dfs_dict.items():
-  display(f"Info on {i}")
-  display(v.head())
-  display(v.describe())
-  display(v.info())
 
 #@title Compute Conversion Rate
 def compute_conversions(dict):
@@ -334,7 +341,7 @@ def compute_conversions(dict):
     num_cols.remove(denom_name) # dont need conversion on denominator
     #compute conversion rate for each numerator/denominator
     for i in num_cols:
-      if i.endswith("s") or i.endswith("es"):
+      if i.endswith("s") or i.endswith("es"): #get conversions and
         new_i = i[:-1]
       else:
         new_i = i
@@ -386,7 +393,6 @@ print(compute_relative_lift.__doc__)
 agg_lifts_dict = compute_relative_lift(agg_conversions_dict)
 
 # @title Visualize Time Series Data
-
 def percentage_formatter(x, pos):
         return f'{x * 100:.2f}%'
 
@@ -406,24 +412,26 @@ def visualize_experiment_data(data_dict):
       #drop denominator column based on user inputs
       metric_list_ov_fun.remove(denom_name)
 
-      """ NOTE: The following hard-coded lines"""
-      metric_list_sub = ['Monthly Conversions', 'Annual Conversions', 'Premium Conversions', 'Premium Plus Conversions']
       #drop s and match metric naming conventions
       metric_list_ov_fun_new = [x[:-1] for x in metric_list_ov_fun if x.endswith('s')]
-      metric_list_sub_new = [x[:-1] for x in metric_list_sub if x.endswith('s')]
       metric_list_ov_rate = [m + " Rate" for m in metric_list_ov_fun_new]
-      metric_list_sub_rate = [m + " Rate" for m in metric_list_sub_new]
       metric_list_ov_vs_control = [m + " Relative Lift vs Control" for m in metric_list_ov_rate]
-      metric_list_sub_vs_control = [m + " Relative Lift vs Control" for m in metric_list_sub_rate]
 
       metric_lol = [
-            metric_list_ov, metric_list_sub,
-            metric_list_ov_rate, metric_list_sub_rate,
-            metric_list_ov_vs_control, metric_list_sub_vs_control
+            metric_list_ov,
+            metric_list_ov_rate,
+            metric_list_ov_vs_control
       ]
-      metric_names_lol = ['Funnel Metrics','Subscription Metrics','Funnel Rates',
-                          'Subscription Rates','Funnel Rates vs Control','Subscription Rates vs Control']
+      metric_names_lol = ['Funnel Metrics','Funnel Rates','Funnel Rates vs Control']
 
+      if include_plan_level_conversion_metrics == "Yes":
+        """ NOTE: The following hard-coded lines"""
+        metric_list_sub = ['Monthly Conversions', 'Annual Conversions', 'Premium Conversions', 'Premium Plus Conversions']
+        metric_list_sub_new = [x[:-1] for x in metric_list_sub if x.endswith('s')]
+        metric_list_sub_rate = [m + " Rate" for m in metric_list_sub_new]
+        metric_list_sub_vs_control = [m + " Relative Lift vs Control" for m in metric_list_sub_rate]
+        metric_lol += [metric_list_sub, metric_list_sub_rate, metric_list_sub_vs_control]
+        metric_names_lol += ['Subscription Metrics', 'Subscription Rates', 'Subscription Rates vs Control']
 
       """ End of hard-coding heavy section """
       for i, metric_group in enumerate(metric_lol):
@@ -457,8 +465,13 @@ def visualize_experiment_data(data_dict):
           ax.set_title(f'{k}: {metric}')
           ax.legend(loc='best',  frameon=True, fontsize=8)
         plt.tight_layout(pad = 2)
-        plt.show()
+        #plt.show()
         fig.savefig(diagnostics_folder + '/' + tsv_name +'/'+  chart_name)
+        if chart_name in ["Funnel Rates vs Control: Cumulative Daily Variant Level.png", "Funnel Rates: Daily Variant Level.png"]:
+          chart_buffer = BytesIO()
+          fig.savefig(chart_buffer, format="png", bbox_inches='tight')
+          plt.close()
+          report_components[chart_name] = chart_buffer
         plt.clf()
     else:
         pass
@@ -466,8 +479,7 @@ print(visualize_experiment_data.__doc__)
 visualize_experiment_data(agg_lifts_dict)
 
 # @title Conduct Hypothesis Testing
-
-def hypothesis_test(dict, alpha):
+def fixed_prop_hypothesis_test(dict, alpha):
   """
   This function takes in dataframes from dictionary which are aggregated to an Overall level and conducts proportions hypothesis testing with specified alpha.
   The output returns a dictionary of tables with hypothesis testing results
@@ -542,8 +554,8 @@ def hypothesis_test(dict, alpha):
     else: # dataframe not eligible for hyp testing
       pass
   return(new_dict)
-print(hypothesis_test.__doc__)
-hypothesis_dict = hypothesis_test(agg_lifts_dict, significance_level)
+print(fixed_prop_hypothesis_test.__doc__)
+hypothesis_dict = fixed_prop_hypothesis_test(agg_lifts_dict, significance_level)
 
 # @title Visualize Hypothesis Testing Data
 def visualize_hyp_data(dict):
@@ -578,7 +590,15 @@ def visualize_hyp_data(dict):
       plt.axhline(y=0.1, color='red', linestyle='dotted', label='Threshold (0.1)', alpha = .5)  # Add the dotted line
       plt.tight_layout(pad = 2)
       plt.savefig(f"{diagnostics_folder}/{htv_name}/{k}; {g}: P-values.png")
-      plt.show()
+      if k == "Overall Variant Level": #add charts to report_component_dict if chart is report_ready
+        # Create a BytesIO buffer to store the chart
+        chart_buffer = BytesIO()
+        # Your code to create the chart using matplotlib
+        plt.savefig(chart_buffer, format="png", bbox_inches='tight')  # bbox_inches='tight' ensures that there is no extra whitespace around the chart
+        plt.close()
+        variable_name = f"{k}:{g}:pval"
+        report_components[variable_name] = chart_buffer
+      #plt.show()
       plt.clf()
 
       #plot name and save confidence interval
@@ -596,10 +616,20 @@ def visualize_hyp_data(dict):
       plt.axhline(y=0.0, color='red', linestyle='dotted', alpha = .5)
       plt.tight_layout(pad = 2)
       plt.savefig(f"{diagnostics_folder}/{htv_name}/{k}: {g}: Relative Lift CI.png")
-      plt.show()
+      if k == "Overall Variant Level": #add charts to report_component_dict if chart is report_ready
+        # Create a BytesIO buffer to store the chart
+        chart_buffer = BytesIO()
+        # Your code to create the chart using matplotlib
+        plt.savefig(chart_buffer, format="png", bbox_inches='tight')  # bbox_inches='tight' ensures that there is no extra whitespace around the chart
+        plt.close()
+        variable_name = f"{k}:{g}:ci"
+        report_components[variable_name] = chart_buffer
+      #plt.show()
       plt.clf()
   plt.close()
   pass
+  #return report_ready_charts
+
 #run function
 print(visualize_hyp_data.__doc__)
 visualize_hyp_data(hypothesis_dict)
@@ -626,83 +656,68 @@ log_dict_data(agg_lifts_dict, 'Analysis Data', diagnostics_folder, al_name )
 log_dict_data(hypothesis_dict, 'Hypothesis Testing Data', diagnostics_folder, al_name)
 print("Data Logged!")
 
-#@title Code to Refresh Directory
-print("Optional: Specify a folder to delete")
-delete_directory_path = 'sample_data' # @param {type:"string"}
-if os.path.exists(delete_directory_path):
-    shutil.rmtree(delete_directory_path)  # This deletes a folder and its contents recursively
-    print(f"Deleted {delete_directory_path}")
-else:
-    print(f"The folder '{delete_directory_path}' does not exist.")
+# @title Gather Report Components
+# Grab tables
+print(hypothesis_dict["Overall Variant Level"]['metric'].unique())
+overall_results_data = hypothesis_dict["Overall Variant Level"].loc[hypothesis_dict["Overall Variant Level"]['metric'].isin(["Click Rate", "Conversion Rate"]),
+ ["variant_group", "metric", "sample_n", "control_n",
+  "sample_mean", "control_mean",
+  "relative_diff", "p_value"]]
+# Format decimals to percentages
+def convert_to_percentage(x):
+    if isinstance(x, (int, float)) and x < 1:  # Check if the value is numeric and less than 1
+        return '{:.2f}%'.format(x * 100)
+    return x  # If not numeric, return the original value
+overall_results_data = overall_results_data.applymap(convert_to_percentage)
+print(type(overall_results_data))
+print("\n")
+print("Items in report components\n")
+for k,v in report_components.items():
+  print(k)
 
+# @title Generate Report
 # Create a PDF file
+
 pdf_file = f"{experiment_name} Report.pdf"
-doc = SimpleDocTemplate(pdf_file, pagesize=letter)
+custom_page_size = (8.5 * inch, len(report_components)*8 * inch)  # Width x Height
+doc = SimpleDocTemplate(pdf_file, pagesize=custom_page_size)
 
 # Define the content for the PDF
 story = []
-
 # Set the styles for the document
 styles = getSampleStyleSheet()
 normal_style = styles["Normal"]
 
 # Add a title
-title = Paragraph("Sample PDF Document", styles["Title"])
+title = Paragraph(f"{experiment_name} Hypothesis Test Results", styles["Title"])
 story.append(title)
 
 # Add text description
-description = """
-This is a sample PDF document created using Python and ReportLab.
-You can include multiple tables, charts, and text descriptions.
+description = f"""
+  This document contains key analytics for {experiment_name} regarding hypothesis testing.
 """
 story.append(Paragraph(description, normal_style))
 story.append(Spacer(1, 0.2 * inch))
 
-# Table 1
-data1 = [["Name", "Age", "Occupation"],
-         ["Alice", 28, "Engineer"],
-         ["Bob", 24, "Designer"],
-         ["Charlie", 32, "Data Scientist"]]
-
-table1 = Table(data1, colWidths=[1.5 * inch, 0.8 * inch, 2 * inch])
-story.append(table1)
+# Overall results table abridged
+overall_results_lol = [overall_results_data.columns.tolist()] + overall_results_data.values.tolist()
+overall_results_tbl = Table(overall_results_lol, rowHeights=0.4*inch)
+overall_results_tbl.setStyle(TableStyle([('GRID', (0, 0), (-1, -1), 1, (0, 0, 0))]))  # Add gridlines to the entire table
+story.append(overall_results_tbl)
 story.append(Spacer(1, 0.2 * inch))
 
-# Chart 1 with text description
-plt.figure(figsize=(6, 4))
-plt.plot([1, 2, 3, 4, 5], [10, 15, 13, 18, 20])
-plt.title("Sample Chart 1")
-plt.xlabel("X-axis")
-plt.ylabel("Y-axis")
-plt.grid(True)
-
-# Save the chart to a BytesIO object
-chart_buffer = BytesIO()
-plt.savefig(chart_buffer, format="png")
-plt.close()
-chart_buffer.seek(0)
-
-# Create an Image element from the chart
-chart_image = Image(chart_buffer, width=4 * inch, height=3 * inch)
-story.append(chart_image)
-
-chart_description = """
-Here is a sample line chart. This chart demonstrates the ability to include charts
-in the PDF document with corresponding text descriptions.
-"""
-story.append(Paragraph(chart_description, normal_style))
-story.append(Spacer(1, 0.2 * inch))
-
-# Table 2
-data2 = [["Product", "Quantity", "Price"],
-         ["Product A", 50, 10.99],
-         ["Product B", 30, 15.49],
-         ["Product C", 20, 8.99]]
-
-table2 = Table(data2, colWidths=[1.5 * inch, 0.8 * inch, 1 * inch])
-story.append(table2)
+# Insert report ready charts
+for k,v in report_components.items():
+  if "pval" in k or "ci" in k:
+    chart_image = Image(v, width=6 * inch, height=6 * inch)
+  else:
+    chart_image = Image(v, width=6 * inch, height=6 * inch)
+  description = f"""{k}"""
+  story.append(Paragraph(description, normal_style))
+  story.append(Spacer(1, 0.2 * inch))
+  story.append(chart_image)
+  story.append(Spacer(1, 0.2 * inch))
 
 # Build the PDF document
 doc.build(story)
-
 print(f"PDF file '{pdf_file}' created successfully.")
